@@ -255,6 +255,21 @@ function fileExists(file) {
 
 //------------------------------------------------------------------------------
 
+function getSingleSubfolder(parent) {
+    if (!dirExists(parent)) {
+        throw `"${parent}" is not initialized`;
+    }
+
+    const folders = getFolders(parent);
+
+    if (folders.length != 1)
+        throw `Cannot find single version of "${parent}"`;
+
+    return path.join(parent, folders[0]);
+}
+
+//------------------------------------------------------------------------------
+
 function readFile(name) {
     return fs.readFileSync(name, "utf8");
 }
@@ -522,16 +537,7 @@ function getEspPackagePath(arduinoUserPath, preferencesPath, target) {
     switch (target.architecture) {
         case "esp8266": {
             const dir = path.join(preferencesPath, "packages", target.package, "hardware", target.architecture);
-
-            if (!dirExists(dir))
-                throw `ESP8266 has not been installed with the Arduino Board Manager.`;
-
-            const folders = getFolders(dir);
-
-            if (folders.length != 1)
-                throw `There should only be one ESP8266 Package installed with the Arduino Board Manager.`;
-
-            const esp8266Path = path.join(dir, folders[0]);
+            const esp8266Path = getSingleSubfolder(dir);
             logImportant(`Found ESP8266 packages: ${esp8266Path}`);
 
             return esp8266Path;
@@ -642,10 +648,28 @@ function getEspToolsPath(arduinoUserPath, preferencesPath, target) {
     return dir;
 }
 
+function getEspPackageTools(packagePath) {
+    const dir = path.resolve(path.join(packagePath, "tools"));
+
+    if (!dirExists(dir))
+        throw `Can't find hardware tools path.`;
+
+    logVerbose(`Tools Path: "${dir}"`);
+    return dir;
+}
+
 //------------------------------------------------------------------------------
 
-function getPythonExecutable() {
-    const python = getVscodeConfigValue(PYTHON_PYTHONPATH) || "python";
+function getPythonExecutable(toolsDir) {
+    let python;
+    if (getVscodeConfigValue(PYTHON_PYTHONPATH)) {
+        python = getVscodeConfigValue(PYTHON_PYTHONPATH);
+    } else if (toolsDir != undefined && dirExists(path.join(toolsDir, "python3"))) {
+        const pythonPath = getSingleSubfolder(path.join(toolsDir, "python3"));
+        python = path.join(pythonPath, program("python"));
+    } else {
+        python = "python";
+    }
 
     logVerbose(`Python Executable: "${python}"`);
     return python;
@@ -698,12 +722,8 @@ function getMkSpiffs(target, espToolsPath) {
 
     switch (target.architecture) {
         case "esp8266": {
-            const folders = getFolders(path.join(espToolsPath, "mkspiffs"));
-
-            if (folders.length != 1)
-                throw `"${target.architecture}" not installed correctly through Arduino Board Manager`;
-
-            const mkspiffs = path.join(espToolsPath, "mkspiffs", folders[0], program("mkspiffs"));
+            const folder = getSingleSubfolder(path.join(espToolsPath, "mkspiffs"));
+            const mkspiffs = path.join(folder, program("mkspiffs"));
 
             if (!fileExists(mkspiffs))
                 throw `"Can't locate "${mkspiffs}"`;
@@ -862,74 +882,24 @@ function getEspTool(target, espToolsPath) {
         return configFile;
     }
 
+    let esptoolPy;
     switch (target.architecture) {
-        case "esp8266": {
-            const folders = getFolders(path.join(espToolsPath, "esptool"));
-
-            if (folders.length != 1)
-                throw `"${target.architecture}" not installed correctly through Arduino Board Manager`;
-
-            const version = folders[0];
-
-            const esptool = path.join(espToolsPath, "esptool", version, program("esptool"));
-
-            if (!fileExists(esptool))
-                throw `"Can't locate "${esptool}"`;
-
-            logVerbose(`esptool (${version}): ${CYAN}${esptool}`);
-
-            return esptool;
-        }
-
+        case "esp8266":
+            esptoolPy = path.join(espToolsPath, program("upload.py"));
+            break;
         case "esp32": {
-            const esptoolPy = path.join(espToolsPath, program("esptool.py"));
-
-            if (!fileExists(esptoolPy))
-                throw `"Can't locate "${esptoolPy}"`;
-
-            logVerbose(`esptool: ${CYAN}${esptoolPy}`);
-
-            return esptoolPy;
+            esptoolPy = path.join(espToolsPath, program("esptool.py"));
+            break;
         }
+
     }
-}
 
-//------------------------------------------------------------------------------
+    if (!fileExists(esptoolPy))
+        throw `"Can't locate "${esptoolPy}"`;
 
-// -ca <address>
-// -cd <resetMethod>
-// -cp <port>
-// -cb <speed>
-// -vvv
+    logVerbose(`esptool: ${CYAN}${esptoolPy}`);
 
-function _uploadSpiffsEspTool(esptool, commPort, spiffsImage, spiffsOptions) {
-    log(`--- Uploading SPIFFS file with esptool[.exe] ---`);
-
-    const uploadAddress = `0x` + toHex(stringToInt(spiffsOptions.spiffs_start), 6);
-    const uploadSpeed = stringToInt(spiffsOptions.speed);
-    const resetMethod = spiffsOptions.resetmethod;
-
-    logImportant(`SPIFFS Uploading Image... (${spiffsImage})`);
-    logSpiffs(`program: ${esptool}`);
-    logSpiffs(`address: ${uploadAddress}`);
-    logSpiffs(`reset  : ${resetMethod}`);
-    logSpiffs(`port   : ${commPort}`);
-    logSpiffs(`speed  : ${uploadSpeed}`);
-
-    let args = [
-        "-ca", uploadAddress,          // Address in flash.
-        "-cd", resetMethod,            // Board reset method: "none", "ck", "nodemcu", or "wifio".
-        "-cp", commPort,               // Serial Port (Default Linux: /dev/ttyUSB0, Windows: COM1, OSx: /dev/tty.usbserial).
-        "-cb", uploadSpeed,            // Baud rate (Default: 115200).
-        "-cf", makeOsPath(spiffsImage) // SPIFFS File
-    ];
-
-    const verbosity = getVscodeConfigValue(ESP8266FS_ESPTOOL_VERBOSITY);
-
-    if (verbosity)
-        args.unshift(`-${verbosity}`);
-
-    runCommand(makeOsPath(esptool), args);
+    return esptoolPy;
 }
 
 //------------------------------------------------------------------------------
@@ -949,10 +919,8 @@ function _uploadSpiffsEspTool(esptool, commPort, spiffsImage, spiffsOptions) {
 // --spi_connection <spi>
 // --verify
 
-function _uploadSpiffsEspToolPy(esptool, commPort, spiffsImage, spiffsOptions, target) {
+function uploadSpiffsEspToolPy(python, esptool, commPort, spiffsImage, spiffsOptions, target) {
     log(`--- Uploading SPIFFS file with esptool.py ---`);
-
-    const python = getPythonExecutable();
 
     const uploadAddress = `0x` + toHex(stringToInt(spiffsOptions.spiffs_start), 6);
     const uploadSpeed = stringToInt(spiffsOptions.speed);
@@ -961,9 +929,6 @@ function _uploadSpiffsEspToolPy(esptool, commPort, spiffsImage, spiffsOptions, t
     const before = getVscodeConfigValue(ESP8266FS_ESPTOOL_PY_BEFORE) || "default_reset";
     const after = getVscodeConfigValue(ESP8266FS_ESPTOOL_PY_AFTER) || "hard_reset";
 
-    const flashMode = target.flashMode;
-    const flashFreq = target.flashFreq;
-    const flashSize = target.flashSize || "detect";
 
     logImportant(`SPIFFS Uploading Image... (${spiffsImage})`);
     logSpiffs(`Python   : ${python}`);
@@ -973,9 +938,6 @@ function _uploadSpiffsEspToolPy(esptool, commPort, spiffsImage, spiffsOptions, t
     logSpiffs(`speed    : ${uploadSpeed}`);
     logSpiffs(`before   : ${before}`);
     logSpiffs(`after    : ${after}`);
-    logSpiffs(`flashMode: ${flashMode}`);
-    logSpiffs(`flashFreq: ${flashFreq}`);
-    logSpiffs(`flashSize: ${flashSize}`);
 
     const spi = getVscodeConfigValue(ESP8266FS_ESPTOOL_PY_SPI) || "";
     if (spi)
@@ -1007,12 +969,6 @@ function _uploadSpiffsEspToolPy(esptool, commPort, spiffsImage, spiffsOptions, t
 
     if (compress)
         args.push("--compress");
-
-    args.push(
-        "--flash_mode", flashMode,
-        "--flash_freq", flashFreq,
-        "--flash_size", flashSize
-    );
 
     if (spi)
         args.push("--spi-connection", spi);
@@ -1102,14 +1058,6 @@ function _downloadSpiffsEspToolPy(esptool, commPort, spiffsImage, spiffsOptions,
     args.push(downloadAddress, makeOsPath(spiffsImage));
 
     runCommand(makeOsPath(python), args);
-}
-//------------------------------------------------------------------------------
-
-function uploadSpiffsEspTool(esptool, commPort, spiffsImage, spiffsOptions, target) {
-    if (esptool.match(/\.py$/))
-        _uploadSpiffsEspToolPy(esptool, commPort, spiffsImage, spiffsOptions, target);
-    else
-        _uploadSpiffsEspTool(esptool, commPort, spiffsImage, spiffsOptions);
 }
 
 //------------------------------------------------------------------------------
@@ -1209,6 +1157,7 @@ async function _executeSpiffs(command) {
 
     const arduinoUserPath = getArduinoUserPath();
     const espPackagePath = getEspPackagePath(arduinoUserPath, preferencesPath, target);
+    const espPackageToolPath = getEspPackageTools(espPackagePath);
     const espToolsPath = getEspToolsPath(arduinoUserPath, preferencesPath, target);
 
     const spiffsOptions = getSpiffsOptions(espPackagePath, target, arduinoJson, preferences);
@@ -1216,6 +1165,7 @@ async function _executeSpiffs(command) {
     const port = getPort(arduinoJson, preferences);
 
     const mkspiffs = getMkSpiffs(target, espToolsPath);
+    const python = getPythonExecutable(espToolsPath);
 
         // --- Ready to get down to business ---
 
@@ -1224,7 +1174,7 @@ async function _executeSpiffs(command) {
             if (isIP(port))
                 uploadSpiffsOta(getEspotaPy(espPackagePath), port, spiffsImage);
             else
-                uploadSpiffsEspTool(getEspTool(target, espToolsPath), port, spiffsImage, spiffsOptions, target);
+                uploadSpiffsEspToolPy(python, getEspTool(target, espPackageToolPath), port, spiffsImage, spiffsOptions, target);
 
             break;
         }
